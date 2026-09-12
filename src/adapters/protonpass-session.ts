@@ -10,6 +10,19 @@ const UNLOCK_PROMPT_DELAY_MS = 1_000;
 
 export interface PassCliInfo {
   session_has_lock?: boolean;
+  personal_access_token_name?: string;
+}
+
+export function isPassCliPatSession(info: PassCliInfo): boolean {
+  return Boolean(info.personal_access_token_name?.trim());
+}
+
+export function passCliSessionHasLock(info: PassCliInfo): boolean {
+  if (isPassCliPatSession(info)) {
+    return false;
+  }
+
+  return info.session_has_lock === true;
 }
 
 export function isValidProtonPassPin(pin: string): boolean {

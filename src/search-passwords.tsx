@@ -39,6 +39,7 @@ import {
   lockExtensionSessionIfExpired,
   markSessionActivity,
   parseSessionTimeoutMinutes,
+  rememberCredentials,
   subscribeToExtensionSession,
 } from "./utils/credential-vault";
 import { filterVaultItems } from "./utils/items";
@@ -623,11 +624,21 @@ export default function SearchPasswords() {
     allAdapters.find((adapter) => adapter.id === activeManagerId);
   const selectedStatus = adapterStatuses?.find((entry) => entry.adapter.id === activeManagerId)?.status;
   const extensionSessionState = getExtensionSessionState();
+  const canAutoBootstrapExtensionSession = Boolean(
+    selectedAdapter &&
+      selectedStatus?.ok &&
+      !adapterNeedsAuth(selectedStatus) &&
+      isExtensionSessionEnabled() &&
+      selectedAdapter.authenticate &&
+      extensionSessionState === "empty" &&
+      !unlockedIds.includes(selectedAdapter.id),
+  );
   const needsExtensionUnlock =
     sessionEpoch >= 0 &&
     isExtensionSessionEnabled() &&
     Boolean(selectedAdapter?.authenticate) &&
-    (extensionSessionState === "empty" || extensionSessionState === "locked");
+    (extensionSessionState === "empty" || extensionSessionState === "locked") &&
+    !canAutoBootstrapExtensionSession;
   const showUnlockForm = Boolean(
     selectedAdapter &&
     (needsExtensionUnlock ||
@@ -638,6 +649,16 @@ export default function SearchPasswords() {
   );
   const supportsLocalCache = Boolean(selectedAdapter?.listItems);
   const canLoadItems = isSessionReady && !showUnlockForm;
+
+  useEffect(() => {
+    if (!canAutoBootstrapExtensionSession || !selectedAdapter) {
+      return;
+    }
+
+    rememberCredentials(selectedAdapter.id, {});
+    setUnlockedIds((ids) => (ids.includes(selectedAdapter.id) ? ids : [...ids, selectedAdapter.id]));
+    bumpSessionEpoch();
+  }, [canAutoBootstrapExtensionSession, selectedAdapter?.id]);
 
   const {
     data: allItems,

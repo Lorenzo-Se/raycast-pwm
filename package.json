@@ -44,10 +44,7 @@
       "required": false,
       "title": "External Adapters Directory",
       "description": "Path to a folder containing third-party adapter subfolders (each with pwm-adapter.json), e.g. ~/.config/raycast-pwm/adapters on macOS or %USERPROFILE%\\.config\\raycast-pwm\\adapters on Windows",
-      "placeholder": {
-        "macOS": "~/.config/raycast-pwm/adapters",
-        "Windows": "%USERPROFILE%\\.config\\raycast-pwm\\adapters"
-      }
+      "placeholder": "~/.config/raycast-pwm/adapters"
     },
     {
       "name": "defaultManagerOverride",
@@ -63,10 +60,7 @@
       "required": false,
       "title": "CLI Path Overrides (JSON)",
       "description": "Optional JSON map of adapter ID to CLI binary path, e.g. {\"1password\": \"/opt/homebrew/bin/op\"} on macOS or {\"protonpass\": \"C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\Programs\\\\pass-cli\\\\pass-cli.exe\"} on Windows",
-      "placeholder": {
-        "macOS": "{\"1password\": \"/opt/homebrew/bin/op\"}",
-        "Windows": "{\"protonpass\": \"%LOCALAPPDATA%\\\\Programs\\\\pass-cli\\\\pass-cli.exe\"}"
-      }
+      "placeholder": "{\"1password\": \"/opt/homebrew/bin/op\"}"
     },
     {
       "name": "closeAfterCopy",

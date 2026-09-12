@@ -8,6 +8,7 @@ import {
   isPassCliSessionLocked,
   isValidProtonPassPin,
   isWrongPinError,
+  passCliSessionHasLock,
   unlockPassCliSession,
 } from "./protonpass-session";
 
@@ -232,8 +233,9 @@ async function checkProtonPassAvailability(): Promise<AdapterStatus> {
     return { ok: false, reason: "pass-cli not found. Install from https://protonpass.github.io/pass-cli/" };
   }
 
+  let info;
   try {
-    await getPassCliInfo(binary);
+    info = await getPassCliInfo(binary);
   } catch (error) {
     return {
       ok: false,
@@ -241,7 +243,7 @@ async function checkProtonPassAvailability(): Promise<AdapterStatus> {
     };
   }
 
-  if (await isPassCliSessionLocked(binary)) {
+  if (passCliSessionHasLock(info) && (await isPassCliSessionLocked(binary))) {
     return {
       ok: false,
       reason: "Session gesperrt. Bitte 6-stellige PIN eingeben.",
@@ -261,7 +263,21 @@ export const protonPassAdapter: PasswordManagerAdapter = {
     return checkProtonPassAvailability();
   },
 
-  getAuthRequirements(): AuthRequirements {
+  async getAuthRequirements(): Promise<AuthRequirements> {
+    const binary = await getBinary();
+    if (!binary) {
+      return { fields: [] };
+    }
+
+    try {
+      const info = await getPassCliInfo(binary);
+      if (!passCliSessionHasLock(info)) {
+        return { fields: [] };
+      }
+    } catch {
+      return { fields: [] };
+    }
+
     return PROTON_PASS_PIN_REQUIREMENTS;
   },
 
@@ -269,6 +285,18 @@ export const protonPassAdapter: PasswordManagerAdapter = {
     const binary = await getBinary();
     if (!binary) {
       return { ok: false, reason: "pass-cli not found. Install from https://protonpass.github.io/pass-cli/" };
+    }
+
+    try {
+      const info = await getPassCliInfo(binary);
+      if (!passCliSessionHasLock(info)) {
+        return { ok: true };
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : "Not logged in. Run pass-cli login to authenticate.",
+      };
     }
 
     const pin = credentials.pin ?? "";

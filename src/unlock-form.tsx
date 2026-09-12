@@ -65,8 +65,7 @@ export function UnlockForm({
       }
 
       try {
-        const loaded = await selected.getAuthRequirements();
-        return loaded.fields.length > 0 ? loaded : FALLBACK_REQUIREMENTS;
+        return await selected.getAuthRequirements();
       } catch {
         return FALLBACK_REQUIREMENTS;
       }
@@ -124,6 +123,26 @@ export function UnlockForm({
     autoPromptedRef.current = true;
     void unlockWithBiometricsRef.current();
   }, [touchIdEligible, adapter.id, isSubmitting]);
+
+  useEffect(() => {
+    if (isLoadingRequirements || isLoadingTouchId || !requirements || requirements.fields.length > 0) {
+      return;
+    }
+
+    if (touchIdEligible || isSubmitting || autoPromptedRef.current || isBiometricUnlockInProgress()) {
+      return;
+    }
+
+    autoPromptedRef.current = true;
+    void (async () => {
+      setIsSubmitting(true);
+      try {
+        await authenticateWithCredentials({});
+      } finally {
+        setIsSubmitting(false);
+      }
+    })();
+  }, [requirements, isLoadingRequirements, isLoadingTouchId, touchIdEligible, isSubmitting]);
 
   async function persistCredentialsAfterUnlock(credentials: Record<string, string>): Promise<void> {
     if (isExtensionSessionEnabled()) {
@@ -325,6 +344,8 @@ export function UnlockForm({
       ) : null}
       {touchIdEligible ? (
         <Form.Description text="Unlock with Touch ID from the action panel, or enter your password/PIN. The biometric prompt may dismiss Raycast; reopen Search Passwords after success." />
+      ) : fields.length === 0 ? (
+        <Form.Description text="No password manager unlock is required. The extension session will start automatically." />
       ) : sessionEnabled && sessionState === "empty" ? (
         <Form.Description text="Enter your master password/PIN to start the extension session. After the session expires, unlock with Touch ID." />
       ) : null}

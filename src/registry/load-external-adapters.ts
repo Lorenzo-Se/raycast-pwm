@@ -161,12 +161,22 @@ export async function loadExternalAdapters(): Promise<PasswordManagerAdapter[]> 
   }
 
   const adapters: PasswordManagerAdapter[] = [];
+  const seenIds = new Set<string>();
 
   for (const entryName of entries) {
     const adapterDirectory = join(directory, entryName);
 
     try {
-      adapters.push(loadExternalAdapterFromDirectory(adapterDirectory));
+      const adapter = loadExternalAdapterFromDirectory(adapterDirectory);
+      if (seenIds.has(adapter.id)) {
+        console.warn(
+          `Skipping duplicate external adapter id "${adapter.id}" in ${adapterDirectory}. Each adapter id must be unique.`,
+        );
+        continue;
+      }
+
+      seenIds.add(adapter.id);
+      adapters.push(adapter);
     } catch (error) {
       console.warn(
         `Skipping external adapter in ${adapterDirectory}: ${error instanceof Error ? error.message : String(error)}`,
