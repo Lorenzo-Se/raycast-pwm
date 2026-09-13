@@ -1,15 +1,20 @@
-import { execFileSync } from "child_process";
-import { existsSync, chmodSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
-
 import { getPreferenceValues } from "@raycast/api";
+
+import { parseSessionTimeoutMinutes } from "../session-helper/protocol";
+import {
+  clearSessionHelper,
+  getSessionHelperSnapshot,
+  lockSessionHelper,
+  markActivityInSessionHelper,
+  rememberInSessionHelper,
+  sessionHelperParams,
+  unlockAfterPresenceInSessionHelper,
+} from "./session-helper-client";
 
 export type ExtensionSessionState = "disabled" | "empty" | "active" | "locked";
 
-const DEFAULT_SESSION_TIMEOUT_MINUTES = 15;
-const MIN_SESSION_TIMEOUT_MINUTES = 1;
-const MAX_SESSION_TIMEOUT_MINUTES = 1440;
+export { parseSessionTimeoutMinutes } from "../session-helper/protocol";
+
 const GLOBAL_VAULT_KEY = "__raycastPwmExtensionSession";
 
 type SessionPreferences = {
@@ -25,74 +30,18 @@ interface VaultRuntime {
   listeners: Set<SessionListener>;
   locked: boolean;
   lastActivityAt: number;
-  expiryTimer: ReturnType<typeof setTimeout> | undefined;
-  hydrated: boolean;
+  hydratedFromHelper: boolean;
 }
 
-interface PersistedVault {
-  scopePid: number;
-  locked: boolean;
-  lastActivityAt: number;
-  credentials: Record<string, Record<string, string>>;
+function preferences(): SessionPreferences {
+  return getPreferenceValues<SessionPreferences>();
 }
 
-function processName(pid: number): string {
-  if (process.platform !== "darwin" && process.platform !== "linux") {
-    return "";
-  }
-
-  try {
-    return execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" }).trim();
-  } catch {
-    return "";
-  }
-}
-
-function parentPid(pid: number): number | undefined {
-  if (process.platform !== "darwin" && process.platform !== "linux") {
-    return undefined;
-  }
-
-  try {
-    const parsed = Number.parseInt(
-      execFileSync("ps", ["-p", String(pid), "-o", "ppid="], { encoding: "utf8" }).trim(),
-      10,
-    );
-    return Number.isFinite(parsed) && parsed > 1 ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function getRaycastProcessId(): number {
-  let pid = process.ppid;
-  for (let index = 0; index < 10 && pid > 1; index++) {
-    const name = processName(pid);
-    if (/(^|\/)Raycast$/i.test(name) || /Raycast\.exe$/i.test(name)) {
-      return pid;
-    }
-
-    const next = parentPid(pid);
-    if (!next || next === pid) {
-      break;
-    }
-    pid = next;
-  }
-
-  return process.ppid;
-}
-
-function snapshotPath(scopePid: number): string {
-  return join(tmpdir(), `raycast-pwm-session-${scopePid}.json`);
+function helperConfig(): { timeoutMinutes: number; enabled: boolean } {
+  return sessionHelperParams(
+    parseSessionTimeoutMinutes(preferences().sessionTimeoutMinutes),
+    isExtensionSessionEnabled(),
+  );
 }
 
 function runtime(): VaultRuntime {
@@ -103,91 +52,34 @@ function runtime(): VaultRuntime {
       listeners: new Set(),
       locked: false,
       lastActivityAt: 0,
-      expiryTimer: undefined,
-      hydrated: false,
+      hydratedFromHelper: false,
     };
   }
 
-  const state = globalState[GLOBAL_VAULT_KEY];
-  if (!state.hydrated) {
-    state.hydrated = true;
-    restoreSnapshot(state);
-  }
-
-  return state;
+  return globalState[GLOBAL_VAULT_KEY];
 }
 
-function restoreSnapshot(state: VaultRuntime): void {
-  const scopePid = getRaycastProcessId();
-  const path = snapshotPath(scopePid);
+function cloneCredentials(credentials: Record<string, string>): Record<string, string> {
+  return { ...credentials };
+}
 
-  if (!isProcessAlive(scopePid) || !existsSync(path)) {
-    return;
-  }
-
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as PersistedVault;
-    if (parsed.scopePid !== scopePid || typeof parsed.lastActivityAt !== "number") {
-      unlinkSync(path);
-      return;
-    }
-
-    state.locked = parsed.locked === true;
-    state.lastActivityAt = parsed.lastActivityAt;
-    state.credentialsByAdapter = new Map(
-      Object.entries(parsed.credentials ?? {}).filter(([, value]) => value && typeof value === "object"),
-    );
-  } catch {
-    try {
-      unlinkSync(path);
-    } catch {
-      // Ignore cleanup failures.
-    }
+function notifySessionListeners(): void {
+  for (const listener of runtime().listeners) {
+    listener();
   }
 }
 
-function persistSnapshot(): void {
+function applySnapshot(snapshot: {
+  credentialsByAdapter: Record<string, Record<string, string>>;
+  locked: boolean;
+  lastActivityAt: number;
+}): void {
   const state = runtime();
-  const scopePid = getRaycastProcessId();
-  const path = snapshotPath(scopePid);
-
-  if (state.credentialsByAdapter.size === 0) {
-    try {
-      if (existsSync(path)) {
-        unlinkSync(path);
-      }
-    } catch {
-      // Ignore cleanup failures.
-    }
-    return;
-  }
-
-  const payload: PersistedVault = {
-    scopePid,
-    locked: state.locked,
-    lastActivityAt: state.lastActivityAt,
-    credentials: Object.fromEntries(state.credentialsByAdapter),
-  };
-
-  try {
-    writeFileSync(path, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
-    chmodSync(path, 0o600);
-  } catch {
-    // Persistence is best-effort; RAM still works within this process.
-  }
-}
-
-export function parseSessionTimeoutMinutes(raw: string | undefined): number {
-  const parsed = Number.parseInt(raw ?? String(DEFAULT_SESSION_TIMEOUT_MINUTES), 10);
-  if (!Number.isFinite(parsed)) {
-    return DEFAULT_SESSION_TIMEOUT_MINUTES;
-  }
-
-  return Math.min(MAX_SESSION_TIMEOUT_MINUTES, Math.max(MIN_SESSION_TIMEOUT_MINUTES, parsed));
-}
-
-function preferences(): SessionPreferences {
-  return getPreferenceValues<SessionPreferences>();
+  state.credentialsByAdapter = new Map(
+    Object.entries(snapshot.credentialsByAdapter ?? {}).filter(([, value]) => value && typeof value === "object"),
+  );
+  state.locked = snapshot.locked === true;
+  state.lastActivityAt = typeof snapshot.lastActivityAt === "number" ? snapshot.lastActivityAt : 0;
 }
 
 export function isExtensionSessionEnabled(): boolean {
@@ -202,45 +94,26 @@ export function getExtensionSessionTimeoutMs(): number {
   return parseSessionTimeoutMinutes(preferences().sessionTimeoutMinutes) * 60_000;
 }
 
-function cloneCredentials(credentials: Record<string, string>): Record<string, string> {
-  return { ...credentials };
-}
-
-function notifySessionListeners(): void {
-  for (const listener of runtime().listeners) {
-    listener();
-  }
-}
-
-function clearExpiryTimer(): void {
+export async function hydrateCredentialVault(): Promise<void> {
   const state = runtime();
-  if (state.expiryTimer !== undefined) {
-    clearTimeout(state.expiryTimer);
-    state.expiryTimer = undefined;
-  }
-}
-
-function scheduleExpiryTimer(): void {
-  clearExpiryTimer();
-
-  const state = runtime();
-  if (
-    !isExtensionSessionEnabled() ||
-    state.locked ||
-    state.credentialsByAdapter.size === 0 ||
-    state.lastActivityAt === 0
-  ) {
+  if (state.hydratedFromHelper) {
     return;
   }
 
-  const remainingMs = getExtensionSessionTimeoutMs() - (Date.now() - state.lastActivityAt);
-  state.expiryTimer = setTimeout(
-    () => {
-      runtime().expiryTimer = undefined;
-      lockExtensionSessionIfExpired();
-    },
-    Math.max(0, remainingMs),
-  );
+  if (!isExtensionSessionEnabled()) {
+    state.hydratedFromHelper = true;
+    return;
+  }
+
+  try {
+    const snapshot = await getSessionHelperSnapshot(helperConfig());
+    applySnapshot(snapshot);
+  } catch {
+    // Fall back to an empty local session if the helper is unavailable.
+  }
+
+  state.hydratedFromHelper = true;
+  notifySessionListeners();
 }
 
 export function subscribeToExtensionSession(listener: SessionListener): () => void {
@@ -260,9 +133,15 @@ export function rememberCredentials(adapterId: string, credentials: Record<strin
   state.credentialsByAdapter.set(adapterId, cloneCredentials(credentials));
   state.locked = false;
   state.lastActivityAt = Date.now();
-  persistSnapshot();
-  scheduleExpiryTimer();
   notifySessionListeners();
+
+  void rememberInSessionHelper({
+    adapterId,
+    credentials: cloneCredentials(credentials),
+    ...helperConfig(),
+  }).catch(() => {
+    // Helper sync is best-effort; local cache still works within this process.
+  });
 }
 
 export function hasRememberedCredentials(adapterId: string): boolean {
@@ -285,9 +164,8 @@ export function lockExtensionSession(): void {
   }
 
   state.locked = true;
-  clearExpiryTimer();
-  persistSnapshot();
   notifySessionListeners();
+  void lockSessionHelper().catch(() => undefined);
 }
 
 export function unlockExtensionSessionAfterPresence(): void {
@@ -298,9 +176,8 @@ export function unlockExtensionSessionAfterPresence(): void {
 
   state.locked = false;
   state.lastActivityAt = Date.now();
-  persistSnapshot();
-  scheduleExpiryTimer();
   notifySessionListeners();
+  void unlockAfterPresenceInSessionHelper().catch(() => undefined);
 }
 
 export function clearRememberedCredentials(adapterId?: string): void {
@@ -314,11 +191,10 @@ export function clearRememberedCredentials(adapterId?: string): void {
   if (state.credentialsByAdapter.size === 0) {
     state.locked = false;
     state.lastActivityAt = 0;
-    clearExpiryTimer();
   }
 
-  persistSnapshot();
   notifySessionListeners();
+  void clearSessionHelper(adapterId).catch(() => undefined);
 }
 
 export function markSessionActivity(): void {
@@ -332,8 +208,7 @@ export function markSessionActivity(): void {
   }
 
   state.lastActivityAt = Date.now();
-  persistSnapshot();
-  scheduleExpiryTimer();
+  void markActivityInSessionHelper(helperConfig()).catch(() => undefined);
 }
 
 export function isExtensionSessionExpired(): boolean {

@@ -34,6 +34,7 @@ import type { ItemAvailability, PasswordManagerAdapter, VaultItem } from "./type
 import { UnlockForm } from "./unlock-form";
 import {
   getExtensionSessionState,
+  hydrateCredentialVault,
   isExtensionSessionEnabled,
   lockExtensionSession,
   lockExtensionSessionIfExpired,
@@ -43,6 +44,7 @@ import {
   subscribeToExtensionSession,
 } from "./utils/credential-vault";
 import { filterVaultItems } from "./utils/items";
+import { loadLastManagerId, saveLastManagerId } from "./utils/last-manager-selection";
 
 const TOTP_DELAY_MS = 5000;
 const SESSION_DISPOSE_REMOUNT_GRACE_MS = 250;
@@ -499,6 +501,9 @@ export default function SearchPasswords() {
     revalidate: revalidateAdapterStatuses,
   } = usePromise(getAvailableAdapters);
 
+  const { isLoading: isLoadingVault } = usePromise(hydrateCredentialVault);
+  const { data: lastManagerId, isLoading: isLoadingLastManager } = usePromise(loadLastManagerId);
+
   const allAdapters = useMemo(() => adapterStatuses?.map((entry) => entry.adapter) ?? [], [adapterStatuses]);
 
   const [sessionManagerId, setSessionManagerId] = useState<string | undefined>(undefined);
@@ -506,6 +511,8 @@ export default function SearchPasswords() {
   const [sessionEpoch, setSessionEpoch] = useState(0);
   const [searchText, setSearchText] = useState("");
   const dropdownChangeCountRef = useRef(0);
+  const initialSelectionAppliedRef = useRef(false);
+  const activeManagerIdRef = useRef<string | undefined>(undefined);
   const lastActivityRef = useRef(Date.now());
   const previousManagerIdRef = useRef<string | undefined>(undefined);
 
@@ -540,6 +547,13 @@ export default function SearchPasswords() {
     return resolveManagerId(preferred, selectableAdapters, allAdapters);
   }, [allAdapters, selectableAdapters, preferences.defaultManagerId, preferences.defaultManagerOverride]);
 
+  const resolvedInitialManagerId = useMemo(() => {
+    if (lastManagerId && allAdapters.some((adapter) => adapter.id === lastManagerId)) {
+      return lastManagerId;
+    }
+    return preferredManagerId;
+  }, [allAdapters, lastManagerId, preferredManagerId]);
+
   function markActivity(): void {
     if (getExtensionSessionState() === "locked") {
       return;
@@ -556,9 +570,37 @@ export default function SearchPasswords() {
   useEffect(() => {
     dropdownChangeCountRef.current = 0;
     setSessionManagerId(undefined);
-  }, [preferences.defaultManagerId, preferences.defaultManagerOverride, preferredManagerId]);
+    initialSelectionAppliedRef.current = false;
+  }, [preferences.defaultManagerId, preferences.defaultManagerOverride]);
 
-  const activeManagerId = sessionManagerId ?? preferredManagerId;
+  useEffect(() => {
+    if (initialSelectionAppliedRef.current || isLoadingAdapters || isLoadingLastManager) {
+      return;
+    }
+
+    const initial =
+      lastManagerId && allAdapters.some((adapter) => adapter.id === lastManagerId) ? lastManagerId : preferredManagerId;
+
+    if (initial) {
+      setSessionManagerId(initial);
+    }
+
+    dropdownChangeCountRef.current = 0;
+    initialSelectionAppliedRef.current = true;
+  }, [allAdapters, isLoadingAdapters, isLoadingLastManager, lastManagerId, preferredManagerId]);
+
+  const activeManagerId = sessionManagerId ?? resolvedInitialManagerId;
+
+  activeManagerIdRef.current = activeManagerId;
+
+  useEffect(() => {
+    return () => {
+      const managerId = activeManagerIdRef.current;
+      if (managerId) {
+        void saveLastManagerId(managerId);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     return subscribeToExtensionSession(() => {
@@ -626,12 +668,12 @@ export default function SearchPasswords() {
   const extensionSessionState = getExtensionSessionState();
   const canAutoBootstrapExtensionSession = Boolean(
     selectedAdapter &&
-      selectedStatus?.ok &&
-      !adapterNeedsAuth(selectedStatus) &&
-      isExtensionSessionEnabled() &&
-      selectedAdapter.authenticate &&
-      extensionSessionState === "empty" &&
-      !unlockedIds.includes(selectedAdapter.id),
+    selectedStatus?.ok &&
+    !adapterNeedsAuth(selectedStatus) &&
+    isExtensionSessionEnabled() &&
+    selectedAdapter.authenticate &&
+    extensionSessionState === "empty" &&
+    !unlockedIds.includes(selectedAdapter.id),
   );
   const needsExtensionUnlock =
     sessionEpoch >= 0 &&
@@ -732,7 +774,8 @@ export default function SearchPasswords() {
 
   function applyManagerSelection(managerId: string): void {
     markActivity();
-    setSessionManagerId(managerId === preferredManagerId ? undefined : managerId);
+    setSessionManagerId(managerId);
+    void saveLastManagerId(managerId);
   }
 
   async function lockActiveSession(): Promise<void> {
@@ -754,11 +797,15 @@ export default function SearchPasswords() {
   function handleListManagerChange(managerId: string): void {
     dropdownChangeCountRef.current += 1;
 
-    if (dropdownChangeCountRef.current === 1 && managerId !== preferredManagerId) {
+    if (dropdownChangeCountRef.current === 1) {
       return;
     }
 
     applyManagerSelection(managerId);
+  }
+
+  if (isLoadingVault || isLoadingLastManager || isLoadingAdapters) {
+    return <List isLoading navigationTitle="Password Managers" />;
   }
 
   if (!isLoadingAdapters && selectableAdapters.length === 0) {
@@ -826,7 +873,7 @@ export default function SearchPasswords() {
       }}
       searchBarPlaceholder="Search passwords..."
       throttle
-      isLoading={isLoadingAdapters || (canLoadItems && isLoadingItems)}
+      isLoading={isLoadingAdapters || isLoadingVault || isLoadingLastManager || (canLoadItems && isLoadingItems)}
       actions={
         selectedAdapter ? (
           <ActionPanel>

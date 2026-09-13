@@ -21,7 +21,9 @@ npm run dev
 
 Öffne Raycast → **Developer** → den laufenden Dev-Mode-Extension nutzen → **Search Passwords**.
 
-Touch ID kompiliert ein kleines Swift-CLI (`swift/BiometricAuth/main.swift`) mit **swiftc** aus den Command Line Tools — die volle Xcode-App ist nicht nötig. `npm run dev` / `npm run build` rufen `npm run build-biometric` zuerst auf.
+Touch ID kompiliert ein kleines Swift-CLI (`swift/BiometricAuth/main.swift`) mit **swiftc** aus den Command Line Tools — die volle Xcode-App ist nicht nötig. `npm run dev` / `npm run build` rufen `npm run build-biometric` und `npm run build-session-helper` zuerst auf.
+
+Die Extension-Session läuft über einen detached **Session-Helper** (`assets/session-helper.mjs`): Credentials bleiben nur im Helper-RAM und überleben Extension-Remounts, solange Raycast läuft. Es werden keine Klartext-Dateien in `/tmp` geschrieben. Der Helper beendet sich automatisch, wenn Raycast beendet wird.
 
 Der Raycast Store lehnt Keychain-Zugriff ab — Touch-ID-Re-Auth ist für lokale/Dev-Builds gedacht, nicht für Store-Submission.
 
@@ -36,7 +38,7 @@ Der Raycast Store lehnt Keychain-Zugriff ab — Touch-ID-Re-Auth ist für lokale
 | Close window after copying           | Raycast nach Copy schließen                                                                                                    |
 | Auto-copy TOTP after password action | TOTP nach 5 Sekunden automatisch kopieren                                                                                      |
 | Session timeout (minutes)            | Idle-Lock nach 1–1440 Minuten (Default 15). Mit Extension-Session: Touch ID. Ohne: Password Manager erneut entsperren          |
-| Enable extension session             | Eigene Raycast-Session: Master-PW/PIN im Prozess-RAM, stilles Re-Unlock der Manager bis Timeout oder Raycast-Quit (Default an) |
+| Enable extension session             | Eigene Raycast-Session: Master-PW/PIN im Session-Helper-RAM, stilles Re-Unlock der Manager bis Timeout oder Raycast-Quit (Default an) |
 | Remember in Keychain                 | macOS: Credentials in der Keychain, damit Touch ID auch nach einem Raycast-Neustart geht (Default aus)                         |
 
 ## Built-in Password Manager hinzufügen
@@ -88,8 +90,11 @@ src/
     ├── cli.ts
     ├── credential-vault.ts
     ├── items.ts
-    └── paths.ts
+    ├── paths.ts
+    ├── raycast-process.ts
+    └── session-helper-client.ts
 
+assets/session-helper.mjs              # Session-Helper (RAM-only, IPC)
 swift/BiometricAuth/                   # Touch ID + Keychain CLI (macOS, swiftc)
 examples/external-adapter/protonpass/  # Proton Pass CLI (extern)
 examples/external-adapter/threepass/   # ThreePass (extern, persistent + Master-PW)

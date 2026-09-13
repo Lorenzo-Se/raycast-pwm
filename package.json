@@ -119,8 +119,9 @@
   "scripts": {
     "sync-preferences": "node scripts/sync-preferences.mjs",
     "build-biometric": "node scripts/build-biometric-auth.mjs",
-    "build": "npm run sync-preferences && npm run build-biometric && ray build -e dev -o \"$HOME/.config/raycast/extensions/raycast-pwm\"",
-    "dev": "npm run build-biometric && ray develop",
+    "build-session-helper": "node scripts/build-session-helper.mjs",
+    "build": "npm run sync-preferences && npm run build-biometric && npm run build-session-helper && ray build -e dev -o \"$HOME/.config/raycast/extensions/raycast-pwm\"",
+    "dev": "npm run build-biometric && npm run build-session-helper && ray develop",
     "fix-lint": "ray lint --fix",
     "lint": "ray lint",
     "prepublishOnly": "echo \"\\n\\nIt seems like you are trying to publish the Raycast extension to npm.\\n\\nIf you did intend to publish it to npm, remove the \\`prepublishOnly\\` script and rerun \\`npm publish\\` again.\\nIf you wanted to publish it to the Raycast Store instead, use \\`npm run publish\\` instead.\\n\\n\" && exit 1",
