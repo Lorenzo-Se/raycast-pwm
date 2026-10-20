@@ -13,7 +13,10 @@ function matchesQuery(item: VaultItem, query: string): boolean {
   return haystack.some((value) => value.includes(normalized));
 }
 
+export function sortVaultItems(items: VaultItem[]): VaultItem[] {
+  return items.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+}
+
 export function filterVaultItems(items: VaultItem[], query: string): VaultItem[] {
-  const filtered = items.filter((item) => matchesQuery(item, query));
-  return filtered.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+  return sortVaultItems(items.filter((item) => matchesQuery(item, query)));
 }

@@ -30,10 +30,11 @@ import {
   loadAdapters,
   resolveManagerId,
 } from "./registry";
-import type { ItemAvailability, PasswordManagerAdapter, VaultItem } from "./types";
+import type { AdapterStatus, ItemAvailability, PasswordManagerAdapter, VaultItem } from "./types";
 import { UnlockForm } from "./unlock-form";
 import {
   getExtensionSessionState,
+  hasRememberedCredentials,
   hydrateCredentialVault,
   isExtensionSessionEnabled,
   lockExtensionSession,
@@ -43,8 +44,9 @@ import {
   rememberCredentials,
   subscribeToExtensionSession,
 } from "./utils/credential-vault";
-import { filterVaultItems } from "./utils/items";
+import { filterVaultItems, sortVaultItems } from "./utils/items";
 import { loadLastManagerId, saveLastManagerId } from "./utils/last-manager-selection";
+import { ALL_MANAGERS_ID, ALL_MANAGERS_TITLE } from "./utils/manager-selection";
 
 const TOTP_DELAY_MS = 5000;
 const SESSION_DISPOSE_REMOUNT_GRACE_MS = 250;
@@ -163,6 +165,33 @@ async function showActionError(title: string, message?: string): Promise<void> {
 
 function actionErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function collectItems(
+  managerIds: string[],
+  load: (adapter: PasswordManagerAdapter) => Promise<VaultItem[]>,
+): Promise<VaultItem[]> {
+  const adapters = (await loadAdapters()).filter((adapter) => managerIds.includes(adapter.id));
+  const results = await Promise.allSettled(adapters.map(load));
+  const failures = adapters.flatMap((adapter, index) => {
+    const result = results[index];
+    return result.status === "rejected" ? [`${adapter.name}: ${actionErrorMessage(result.reason)}`] : [];
+  });
+
+  if (failures.length > 0 && failures.length === results.length) {
+    const firstFailure = results.find((result) => result.status === "rejected");
+    throw firstFailure?.reason;
+  }
+
+  if (failures.length > 0) {
+    void showToast({
+      style: Toast.Style.Failure,
+      title: "Some password managers failed to load",
+      message: failures.join("\n"),
+    });
+  }
+
+  return results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
 }
 
 function shouldScheduleTotpCopy(options?: CredentialActionOptions): boolean {
@@ -508,7 +537,7 @@ export default function SearchPasswords() {
 
   const [sessionManagerId, setSessionManagerId] = useState<string | undefined>(undefined);
   const [unlockedIds, setUnlockedIds] = useState<string[]>([]);
-  const [sessionEpoch, setSessionEpoch] = useState(0);
+  const [, setSessionEpoch] = useState(0);
   const [searchText, setSearchText] = useState("");
   const dropdownChangeCountRef = useRef(0);
   const initialSelectionAppliedRef = useRef(false);
@@ -548,7 +577,10 @@ export default function SearchPasswords() {
   }, [allAdapters, selectableAdapters, preferences.defaultManagerId, preferences.defaultManagerOverride]);
 
   const resolvedInitialManagerId = useMemo(() => {
-    if (lastManagerId && allAdapters.some((adapter) => adapter.id === lastManagerId)) {
+    if (
+      lastManagerId &&
+      (lastManagerId === ALL_MANAGERS_ID || allAdapters.some((adapter) => adapter.id === lastManagerId))
+    ) {
       return lastManagerId;
     }
     return preferredManagerId;
@@ -578,16 +610,13 @@ export default function SearchPasswords() {
       return;
     }
 
-    const initial =
-      lastManagerId && allAdapters.some((adapter) => adapter.id === lastManagerId) ? lastManagerId : preferredManagerId;
-
-    if (initial) {
-      setSessionManagerId(initial);
+    if (resolvedInitialManagerId) {
+      setSessionManagerId(resolvedInitialManagerId);
     }
 
     dropdownChangeCountRef.current = 0;
     initialSelectionAppliedRef.current = true;
-  }, [allAdapters, isLoadingAdapters, isLoadingLastManager, lastManagerId, preferredManagerId]);
+  }, [isLoadingAdapters, isLoadingLastManager, resolvedInitialManagerId]);
 
   const activeManagerId = sessionManagerId ?? resolvedInitialManagerId;
 
@@ -619,16 +648,25 @@ export default function SearchPasswords() {
     };
   }, []);
 
+  function managerIdsInSelection(managerId: string): string[] {
+    return managerId === ALL_MANAGERS_ID ? allAdapters.map((adapter) => adapter.id) : [managerId];
+  }
+
+  async function releaseManagers(managerIds: string[]): Promise<void> {
+    if (!isExtensionSessionEnabled()) {
+      setUnlockedIds((ids) => ids.filter((id) => !managerIds.includes(id)));
+    }
+    await Promise.all(managerIds.map((id) => disposeSession(id)));
+  }
+
   useEffect(() => {
     const previous = previousManagerIdRef.current;
-    if (previous && previous !== activeManagerId) {
-      void disposeSession(previous);
-      if (!isExtensionSessionEnabled()) {
-        setUnlockedIds((ids) => ids.filter((id) => id !== previous));
-      }
+    previousManagerIdRef.current = activeManagerId;
+    if (!previous || previous === activeManagerId || activeManagerId === ALL_MANAGERS_ID) {
+      return;
     }
 
-    previousManagerIdRef.current = activeManagerId;
+    void releaseManagers(managerIdsInSelection(previous).filter((id) => id !== activeManagerId));
   }, [activeManagerId]);
 
   useEffect(() => {
@@ -640,7 +678,7 @@ export default function SearchPasswords() {
     const tick = (): void => {
       if (isExtensionSessionEnabled()) {
         if (lockExtensionSessionIfExpired()) {
-          void disposeSession(activeManagerId);
+          void releaseManagers(managerIdsInSelection(activeManagerId));
           bumpSessionEpoch();
         }
         return;
@@ -651,56 +689,74 @@ export default function SearchPasswords() {
       }
 
       lastActivityRef.current = Date.now();
-      void disposeSession(activeManagerId);
-      setUnlockedIds((ids) => ids.filter((id) => id !== activeManagerId));
+      void releaseManagers(managerIdsInSelection(activeManagerId));
     };
 
     tick();
     const handle = setInterval(tick, 1000);
 
     return () => clearInterval(handle);
-  }, [activeManagerId, preferences.sessionTimeoutMinutes]);
+  }, [activeManagerId, allAdapters, preferences.sessionTimeoutMinutes]);
 
-  const selectedAdapter =
-    selectableAdapters.find((adapter) => adapter.id === activeManagerId) ??
-    allAdapters.find((adapter) => adapter.id === activeManagerId);
-  const selectedStatus = adapterStatuses?.find((entry) => entry.adapter.id === activeManagerId)?.status;
+  const isAllSelected = activeManagerId === ALL_MANAGERS_ID;
+  const selectedEntry = adapterStatuses?.find((entry) => entry.adapter.id === activeManagerId);
+  const selectedAdapter = selectedEntry?.adapter;
   const extensionSessionState = getExtensionSessionState();
-  const canAutoBootstrapExtensionSession = Boolean(
-    selectedAdapter &&
-    selectedStatus?.ok &&
-    !adapterNeedsAuth(selectedStatus) &&
-    isExtensionSessionEnabled() &&
-    selectedAdapter.authenticate &&
-    extensionSessionState === "empty" &&
-    !unlockedIds.includes(selectedAdapter.id),
+
+  function canAutoBootstrapExtensionSession(adapter: PasswordManagerAdapter, status: AdapterStatus): boolean {
+    return Boolean(
+      status.ok &&
+      isExtensionSessionEnabled() &&
+      adapter.authenticate &&
+      extensionSessionState === "empty" &&
+      !unlockedIds.includes(adapter.id),
+    );
+  }
+
+  function needsUnlock(adapter: PasswordManagerAdapter, status: AdapterStatus): boolean {
+    const needsExtensionUnlock =
+      isExtensionSessionEnabled() &&
+      Boolean(adapter.authenticate) &&
+      (extensionSessionState === "empty" || extensionSessionState === "locked") &&
+      !canAutoBootstrapExtensionSession(adapter, status);
+    return needsExtensionUnlock || (adapterNeedsAuth(status) && !unlockedIds.includes(adapter.id));
+  }
+
+  function canLoadItemsFrom(adapter: PasswordManagerAdapter, status: AdapterStatus): boolean {
+    return (status.ok || unlockedIds.includes(adapter.id)) && !needsUnlock(adapter, status);
+  }
+
+  const showUnlockForm = Boolean(selectedEntry && needsUnlock(selectedEntry.adapter, selectedEntry.status));
+  const scopeEntries = (adapterStatuses ?? []).filter(
+    (entry) => (isAllSelected || entry.adapter.id === activeManagerId) && canLoadItemsFrom(entry.adapter, entry.status),
   );
-  const needsExtensionUnlock =
-    sessionEpoch >= 0 &&
-    isExtensionSessionEnabled() &&
-    Boolean(selectedAdapter?.authenticate) &&
-    (extensionSessionState === "empty" || extensionSessionState === "locked") &&
-    !canAutoBootstrapExtensionSession;
-  const showUnlockForm = Boolean(
-    selectedAdapter &&
-    (needsExtensionUnlock ||
-      (selectedStatus && adapterNeedsAuth(selectedStatus) && !unlockedIds.includes(selectedAdapter.id))),
-  );
-  const isSessionReady = Boolean(
-    selectedAdapter && selectedStatus && (selectedStatus.ok || unlockedIds.includes(selectedAdapter.id)),
-  );
-  const supportsLocalCache = Boolean(selectedAdapter?.listItems);
-  const canLoadItems = isSessionReady && !showUnlockForm;
+  const localManagerIds = scopeEntries.filter((entry) => entry.adapter.listItems).map((entry) => entry.adapter.id);
+  const remoteManagerIds = scopeEntries.filter((entry) => !entry.adapter.listItems).map((entry) => entry.adapter.id);
+  const hasLocalManagers = localManagerIds.length > 0;
+  const hasRemoteManagers = remoteManagerIds.length > 0;
+  const bootstrapManagerIds = scopeEntries
+    .filter((entry) => canAutoBootstrapExtensionSession(entry.adapter, entry.status))
+    .map((entry) => entry.adapter.id);
+  const bootstrapKey = bootstrapManagerIds.join(",");
+  const unlockAdapter = isAllSelected
+    ? extensionSessionState === "locked"
+      ? allAdapters.find((adapter) => adapter.authenticate && hasRememberedCredentials(adapter.id))
+      : undefined
+    : showUnlockForm
+      ? selectedAdapter
+      : undefined;
 
   useEffect(() => {
-    if (!canAutoBootstrapExtensionSession || !selectedAdapter) {
+    if (bootstrapManagerIds.length === 0) {
       return;
     }
 
-    rememberCredentials(selectedAdapter.id, {});
-    setUnlockedIds((ids) => (ids.includes(selectedAdapter.id) ? ids : [...ids, selectedAdapter.id]));
+    for (const id of bootstrapManagerIds) {
+      rememberCredentials(id, {});
+    }
+    setUnlockedIds((ids) => [...ids, ...bootstrapManagerIds.filter((id) => !ids.includes(id))]);
     bumpSessionEpoch();
-  }, [canAutoBootstrapExtensionSession, selectedAdapter?.id]);
+  }, [bootstrapKey]);
 
   const {
     data: allItems,
@@ -708,18 +764,10 @@ export default function SearchPasswords() {
     error: localItemsError,
     revalidate: revalidateLocalItems,
   } = useCachedPromise(
-    async (managerId: string) => {
-      const adapters = await loadAdapters();
-      const adapter = adapters.find((entry) => entry.id === managerId);
-      if (!adapter?.listItems) {
-        return [];
-      }
-
-      return adapter.listItems();
-    },
-    [activeManagerId ?? ""],
+    (managerIds: string[]) => collectItems(managerIds, (adapter) => adapter.listItems?.() ?? Promise.resolve([])),
+    [localManagerIds],
     {
-      execute: Boolean(activeManagerId) && supportsLocalCache && canLoadItems,
+      execute: hasLocalManagers,
       keepPreviousData: true,
     },
   );
@@ -730,33 +778,31 @@ export default function SearchPasswords() {
     error: remoteItemsError,
     revalidate: revalidateRemoteItems,
   } = useCachedPromise(
-    async (managerId: string, query: string) => {
-      const adapters = await loadAdapters();
-      const adapter = adapters.find((entry) => entry.id === managerId);
-      if (!adapter) {
-        return [];
-      }
-
-      return adapter.searchItems(query);
-    },
-    [activeManagerId ?? "", searchText],
+    (managerIds: string[], query: string) => collectItems(managerIds, (adapter) => adapter.searchItems(query)),
+    [remoteManagerIds, searchText],
     {
-      execute: Boolean(activeManagerId) && !supportsLocalCache && canLoadItems,
+      execute: hasRemoteManagers,
       keepPreviousData: false,
     },
   );
 
   const items = useMemo(() => {
-    if (supportsLocalCache) {
-      return allItems ? filterVaultItems(allItems, searchText) : undefined;
+    const localResults = hasLocalManagers && allItems ? filterVaultItems(allItems, searchText) : undefined;
+    const remoteResults = hasRemoteManagers ? remoteItems : undefined;
+    if (!localResults || !remoteResults) {
+      return localResults ?? remoteResults;
     }
 
-    return remoteItems;
-  }, [allItems, remoteItems, searchText, supportsLocalCache]);
+    return sortVaultItems([...localResults, ...remoteResults]);
+  }, [allItems, remoteItems, searchText, hasLocalManagers, hasRemoteManagers]);
 
-  const isLoadingItems = supportsLocalCache ? isLoadingLocalItems : isLoadingRemoteItems;
-  const searchError = supportsLocalCache ? localItemsError : remoteItemsError;
-  const revalidateItems = supportsLocalCache ? revalidateLocalItems : revalidateRemoteItems;
+  const isLoadingItems = (hasLocalManagers && isLoadingLocalItems) || (hasRemoteManagers && isLoadingRemoteItems);
+  const searchError =
+    (hasLocalManagers ? localItemsError : undefined) ?? (hasRemoteManagers ? remoteItemsError : undefined);
+
+  async function revalidateItems(): Promise<void> {
+    await Promise.all([hasLocalManagers && revalidateLocalItems(), hasRemoteManagers && revalidateRemoteItems()]);
+  }
 
   async function reloadItems(): Promise<void> {
     markActivity();
@@ -787,10 +833,8 @@ export default function SearchPasswords() {
     if (isExtensionSessionEnabled()) {
       lockExtensionSession();
       bumpSessionEpoch();
-    } else {
-      setUnlockedIds((ids) => ids.filter((id) => id !== activeManagerId));
     }
-    await disposeSession(activeManagerId);
+    await releaseManagers(managerIdsInSelection(activeManagerId));
     void revalidateAdapterStatuses();
   }
 
@@ -844,17 +888,17 @@ export default function SearchPasswords() {
 
   const unavailableSelection = unavailableAdapters.find(({ adapter }) => adapter.id === activeManagerId);
 
-  if (showUnlockForm && selectedAdapter && activeManagerId) {
+  if (unlockAdapter && activeManagerId) {
     return (
       <UnlockForm
-        adapter={selectedAdapter}
+        adapter={unlockAdapter}
         adapterStatuses={adapterStatuses ?? []}
         activeManagerId={activeManagerId}
         preferredManagerId={preferredManagerId}
         onManagerChange={applyManagerSelection}
         onUnlocked={() => {
           markActivity();
-          setUnlockedIds((ids) => (ids.includes(selectedAdapter.id) ? ids : [...ids, selectedAdapter.id]));
+          setUnlockedIds((ids) => (ids.includes(unlockAdapter.id) ? ids : [...ids, unlockAdapter.id]));
           bumpSessionEpoch();
           void revalidateAdapterStatuses();
         }}
@@ -865,7 +909,7 @@ export default function SearchPasswords() {
 
   return (
     <List
-      navigationTitle={selectedAdapter?.name ?? "Password Managers"}
+      navigationTitle={isAllSelected ? "All Password Managers" : (selectedAdapter?.name ?? "Password Managers")}
       searchText={searchText}
       onSearchTextChange={(text) => {
         markActivity();
@@ -873,9 +917,9 @@ export default function SearchPasswords() {
       }}
       searchBarPlaceholder="Search passwords..."
       throttle
-      isLoading={isLoadingAdapters || isLoadingVault || isLoadingLastManager || (canLoadItems && isLoadingItems)}
+      isLoading={isLoadingAdapters || isLoadingVault || isLoadingLastManager || isLoadingItems}
       actions={
-        selectedAdapter ? (
+        selectedAdapter || isAllSelected ? (
           <ActionPanel>
             <Action title="Reload Items" icon={Icon.ArrowClockwise} onAction={reloadItems} />
             <Action title="Lock Session" icon={Icon.Lock} onAction={lockActiveSession} />
@@ -892,6 +936,9 @@ export default function SearchPasswords() {
             value={activeManagerId}
             onChange={handleListManagerChange}
           >
+            <List.Dropdown.Section>
+              <List.Dropdown.Item title={ALL_MANAGERS_TITLE} value={ALL_MANAGERS_ID} icon={Icon.AppWindowGrid3x3} />
+            </List.Dropdown.Section>
             <List.Dropdown.Section title="Available">
               {availableAdapters.map((adapter) => (
                 <List.Dropdown.Item key={adapter.id} title={adapter.name} value={adapter.id} />
@@ -930,36 +977,48 @@ export default function SearchPasswords() {
           description={unavailableSelection.status.ok ? undefined : unavailableSelection.status.reason}
         />
       )}
-      {!searchError && selectedAdapter && items?.length === 0 && (
+      {!searchError && isAllSelected && scopeEntries.length === 0 && (
+        <List.EmptyView
+          icon={Icon.Lock}
+          title="No unlocked password managers"
+          description="Select a password manager in the dropdown to unlock it"
+        />
+      )}
+      {!searchError && scopeEntries.length > 0 && items?.length === 0 && (
         <List.EmptyView icon={Icon.MagnifyingGlass} title="No items found" description="Try a different search term" />
       )}
-      {items?.map((item) => (
-        <List.Item
-          key={item.id}
-          title={item.title}
-          subtitle={item.subtitle}
-          keywords={[item.username, item.email].filter((value): value is string => Boolean(value))}
-          accessories={[
-            ...(item.email ? [{ text: item.email, icon: Icon.Envelope }] : []),
-            ...(item.username ? [{ text: item.username, icon: Icon.Person }] : []),
-          ]}
-          icon={Icon.Key}
-          actions={
-            selectedAdapter ? (
-              <ItemActions
-                item={item}
-                adapter={selectedAdapter}
-                closeAfterCopy={closeAfterCopy}
-                autoCopyTotpAfterPassword={autoCopyTotpAfterPassword}
-                onActivity={markActivity}
-                onLock={() => {
-                  void lockActiveSession();
-                }}
-              />
-            ) : undefined
-          }
-        />
-      ))}
+      {items?.map((item) => {
+        const itemAdapter =
+          scopeEntries.find((entry) => entry.adapter.id === item.managerId)?.adapter ?? selectedAdapter;
+        return (
+          <List.Item
+            key={`${item.managerId}:${item.id}`}
+            title={item.title}
+            subtitle={item.subtitle}
+            keywords={[item.username, item.email].filter((value): value is string => Boolean(value))}
+            accessories={[
+              ...(item.email ? [{ text: item.email, icon: Icon.Envelope }] : []),
+              ...(item.username ? [{ text: item.username, icon: Icon.Person }] : []),
+              ...(isAllSelected && itemAdapter ? [{ tag: itemAdapter.name }] : []),
+            ]}
+            icon={Icon.Key}
+            actions={
+              itemAdapter ? (
+                <ItemActions
+                  item={item}
+                  adapter={itemAdapter}
+                  closeAfterCopy={closeAfterCopy}
+                  autoCopyTotpAfterPassword={autoCopyTotpAfterPassword}
+                  onActivity={markActivity}
+                  onLock={() => {
+                    void lockActiveSession();
+                  }}
+                />
+              ) : undefined
+            }
+          />
+        );
+      })}
     </List>
   );
 }

@@ -23,6 +23,7 @@ import {
   rememberCredentials,
   unlockExtensionSessionAfterPresence,
 } from "./utils/credential-vault";
+import { ALL_MANAGERS_ID, ALL_MANAGERS_TITLE } from "./utils/manager-selection";
 
 const FALLBACK_REQUIREMENTS: AuthRequirements = {
   fields: [{ id: "password", label: "Passwort", type: "password" }],
@@ -319,6 +320,9 @@ export function UnlockForm({
     >
       {preferredManagerId ? (
         <Form.Dropdown id="manager" title="Password Manager" value={activeManagerId} onChange={onManagerChange}>
+          <Form.Dropdown.Section>
+            <Form.Dropdown.Item title={ALL_MANAGERS_TITLE} value={ALL_MANAGERS_ID} icon={Icon.AppWindowGrid3x3} />
+          </Form.Dropdown.Section>
           {availableAdapters.length > 0 && (
             <Form.Dropdown.Section title="Available">
               {availableAdapters.map((entry) => (
