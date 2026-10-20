@@ -7,6 +7,10 @@ const PIN_PATTERN = /^\d{6}$/;
 const LOCK_CODE_READ_ERROR_PATTERN =
   /reading lock code|prompting for password|device not configured|operation not supported on socket/i;
 const UNLOCK_PROMPT_DELAY_MS = 1_000;
+const SESSION_FRESH_WINDOW_MS = 60_000;
+
+let sessionFreshUntil = 0;
+let sessionProbe: Promise<void> | undefined;
 
 export interface PassCliInfo {
   session_has_lock?: boolean;
@@ -45,14 +49,44 @@ export function isWrongPinError(message: string): boolean {
   return /SessionLocked/i.test(message) || /unlock.*session/i.test(message);
 }
 
+// Each pass-cli process refreshes an expired access token on its own and persists the result,
+// without coordinating with other processes. Parallel calls would all redeem the same single-use
+// refresh token, and Proton invalidates the session. A single probe call refreshes first;
+// calls started while it runs wait for it, then run in parallel on the fresh token.
+async function probePassCliSession(binary: string): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    await runCli(binary, ["info", "--output", "json"]);
+    sessionFreshUntil = startedAt + SESSION_FRESH_WINDOW_MS;
+  } catch {
+    // Not logged in or offline: no refresh can race, so callers run and surface their own error.
+  }
+}
+
+function ensureFreshPassCliSession(binary: string): Promise<void> {
+  if (Date.now() < sessionFreshUntil) {
+    return Promise.resolve();
+  }
+
+  sessionProbe ??= probePassCliSession(binary).finally(() => {
+    sessionProbe = undefined;
+  });
+  return sessionProbe;
+}
+
+export async function runPassCliCommand(binary: string, args: string[]): Promise<string> {
+  await ensureFreshPassCliSession(binary);
+  return runCli(binary, args);
+}
+
 export async function getPassCliInfo(binary: string): Promise<PassCliInfo> {
-  const stdout = await runCli(binary, ["info", "--output", "json"]);
+  const stdout = await runPassCliCommand(binary, ["info", "--output", "json"]);
   return parseJson<PassCliInfo>(stdout);
 }
 
 export async function isPassCliSessionLocked(binary: string): Promise<boolean> {
   try {
-    await runCli(binary, ["vault", "list", "--output", "json"]);
+    await runPassCliCommand(binary, ["vault", "list", "--output", "json"]);
     return false;
   } catch (error) {
     const message = error instanceof CliError ? error.message : String(error);

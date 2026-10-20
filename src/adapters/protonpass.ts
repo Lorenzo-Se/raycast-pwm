@@ -1,6 +1,6 @@
 import { getCliPathOverride } from "../registry";
 import type { AdapterStatus, AuthRequirements, ItemAvailability, PasswordManagerAdapter, VaultItem } from "../types";
-import { CliError, parseJson, resolveBinary, runCli } from "../utils/cli";
+import { CliError, parseJson, resolveBinary } from "../utils/cli";
 import { filterVaultItems } from "../utils/items";
 import {
   getPassCliInfo,
@@ -9,6 +9,7 @@ import {
   isValidProtonPassPin,
   isWrongPinError,
   passCliSessionHasLock,
+  runPassCliCommand,
   unlockPassCliSession,
 } from "./protonpass-session";
 
@@ -69,7 +70,7 @@ async function runPassCli(args: string[]): Promise<string> {
   if (!binary) {
     throw new Error("pass-cli not found");
   }
-  return runCli(binary, args);
+  return runPassCliCommand(binary, args);
 }
 
 function encodeItemId(shareId: string, itemId: string): string {
